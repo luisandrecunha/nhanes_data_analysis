@@ -1,0 +1,462 @@
+---  
+title: "Nhanes dataset analysis"
+author: "CUNHA, LUIS"
+date: "December 12, 2018"
+output:
+  html_document:
+    toc: yes
+---
+
+```{r startup, warning=FALSE, message=FALSE, comment=NA, echo=FALSE}
+
+library(tidyverse)
+library(caret) # Loading Caret package
+library(gridExtra) # To use grid arrange function
+library(Metrics) # To calculate AUC
+library(ROCR) # To plot ROC curves
+
+knitr::opts_chunk$set(comment=NA)
+```
+
+# Analysisng Nhanes dataset
+
+Use the [National Health and Nutrition Examination Survey](https://en.wikipedia.org/wiki/National_Health_and_Nutrition_Examination_Survey) dataset **nhanes** (see below) for this problem.  
+
+*  Use the nhanes data to predict the outcome **DIQ010** indicating diabetes diagnosis (yes/no) from the above dataset.  
+*  Prepare your dataset (e.g., to avoid overfitting)  
+*  Fit you logistic regression, random forest, and gbm models to predict DIQ010  
+*  Tune your models to optimize performance    
+*  Show and *explain* your results, use plots where appropriate  
+*  Evaluate comparative model performance  
+*  State your conclusions  
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#  Do not change the code in this chunk!
+nhanes <- read_csv('nhanes.csv')
+```
+
+## Understand nhanes dataset
+
+In this section I will be analysing the structure of dataset, looking to the data, in order to:
+
+* Understand variables' values, distinct values, min, max, means
+* Identifying Categorical vs Numerical variables
+* Clean data for incomplete cases, finding NAs in the dataset
+
+```{r}
+# Get a look into the dataset
+head(nhanes)
+
+# Understand datatypes
+str(nhanes)
+```
+
+We have several categorical values, inclusive the variable that we want to predict.
+
+In the following chunk of code we will transform those variables in factors:
+```{r}
+# Transform categorical variables into factors
+nhanes <- nhanes %>%
+  mutate(RIAGENDR = as.factor(RIAGENDR),
+         RIDRETH1 = as.factor(RIDRETH1),
+         DR1_300 = as.factor(DR1_300),
+         DIQ010 = as.factor(DIQ010),
+         SLQ050 = as.factor(SLQ050),
+         WHQ030 = as.factor(WHQ030))
+```
+
+Let's have a first look into the distinct values, min, max and means:
+```{r}
+# Get number of records and variables 
+dim(nhanes)
+
+# Sum insights on variables:
+summary(nhanes)
+```
+
+We have 26193 records with 36 variables
+
+A quick look can provide us good insights, we have some outliers:
+
+* Variable that we want to predict has a unbalanced distribution, 12% of people with diabetes on overall population
+* DR1_320Z - This is water ingested in OZ, the max value must be an error - 16,116 oz
+* We have a NA value for LBDSTPSI, we need to remove this observation
+
+```{r}
+# Removing incomplete observations
+nhanes <- nhanes[complete.cases(nhanes),]
+```
+
+Now, let's have a first look into the frequency and distribution of our Categorical and Continuous variables by our response variable: DIQ010
+
+**Categorical variables:**
+
+```{r, fig.align='center', fig.width=4, fig.height=3}
+# Get the Categorical variable naes
+features_factor <- nhanes %>%
+  select_if(is.factor) %>%
+  colnames()
+
+ # new empty list to accomodate the charts
+charts_factors <- list() 
+# iterator fo the list above
+k <- 1
+
+# Create 1 bar chart per our response variable:
+for( i in features_factor ){
+  
+  p <- ggplot(nhanes, aes_string(x=i, fill="DIQ010"))+
+    geom_bar(alpha=0.8, colour='black')
+  
+  # Adding chart to our list
+  charts_factors[[k]] <- p
+  k <- k + 1
+}
+
+# To print all plots
+#charts_factors
+```
+To avoid printing all charts from ```charts_factors```will focus on the ones that I found more relevant.
+
+* Data looks unbalanced by analysing: DIQ010 (our predictor), SLQ050 - people that has trouble sleeping has a higher proportion of Diabetic people
+
+```{r, fig.align='center', fig.width=8, fig.height=3}
+grid.arrange(charts_factors[[4]], charts_factors[[5]], ncol = 2)
+```
+
+* It seems that % of people with Diabetes and underweight is very small, but this can be caused by the lack of observations for underweight people.
+```{r, fig.align='center', fig.width=8, fig.height=3}
+charts_factors[[6]]
+```
+
+
+**Continuous variables:**
+
+```{r}
+# Get only the continuous variables
+features_cont <- setdiff(colnames(nhanes), features_factor )
+
+# new empty list to accomodate the charts
+charts_cont <- list() 
+# iterator fo the list above
+k <- 1
+
+# Create 1 frequency chart per our response variable:
+for( i in features_cont ){
+  
+  p <- ggplot(nhanes, aes_string(x=i, fill="DIQ010")) +
+    geom_histogram(bins=50, alpha=0.8, colour='black')
+  
+  # Adding our chart to the list
+  charts_cont[[k]] <- p
+  k <- k + 1
+}
+
+# To print all plots
+#charts_cont
+```
+To avoid printing all charts from ```charts_cont```I will focus on the ones that I found more relevant.
+
+Overall data seems skewed to the left side and again it shows that is not well balanced, this can be caused by longtail data for each variable. We will scale and normalize it in the modelling phase. Nevertheless, let's have a look into specific situations:
+
+* There is a big portion of diabetic people that don't drink alchool when compared with the rest of the distribution; this also happens when PIR = 5. Probably diabetic people's proportion is the same when compared with less frequent groups. Our models will tell us if these variables are relevant for the diagnotics prediction.
+
+```{r, fig.align='center', fig.width=8, fig.height=3}
+grid.arrange(charts_cont[[4]], charts_cont[[1]], ncol = 2)
+```
+
+* It seems that BMI is key to identify people with diabetes; positive diagnosis is more prevalent in people with a higher BMI. Based on the right hand side chart, total water can also influence the diagnostic, let's assess that later.
+
+```{r, fig.align='center', fig.width=8, fig.height=3}
+grid.arrange(charts_cont[[15]], charts_cont[[3]], ncol = 2)
+```
+
+
+* Age can also contribute to increase to a higher propensity to become diabetic, plot on left side. On the right side we see the impact of a higher level of Glycohemoglobin. Both variables show that they can be good diabetes' predictors, positive diagnosis distributions do not follow the pattern of non-diabetic people.
+
+```{r, fig.align='center', fig.width=8, fig.height=3}
+grid.arrange(charts_cont[[2]], charts_cont[[26]], ncol = 2)
+```
+
+* From the left chart below we can see that Blood Pressure can also increase the risk of diabetes. On the right side we see that Glucose can also increase diabetes risk:
+
+```{r, fig.align='center', fig.width=8, fig.height=3}
+grid.arrange(charts_cont[[18]], charts_cont[[22]], ncol = 2)
+```
+
+Now that we have a good intuition on possible good indicators for response variable, we will validate them in the modelling phase.
+
+
+## Pre-processing data
+
+Our data is unbalanced, we will apply a caret function to do some pre-processing on it, using the result in our predictive models. To pre-process the original data the following methods will be used:
+
+* Scaling data - calculates the standard deviation for each variable and divides each value by its standard deviation.
+* Center - calculates the mean and subtracts it from each value. Combining it with Scaling method it will standardize data: moving centering data to 0 and standard deviation to 1.
+* Near Zero Values - removes variables with a near zero variance.
+
+
+
+```{r}
+set.seed(1)
+# Preprocessing data with methods described above
+preprocessParams <- preProcess(nhanes, method = c("center", "scale",  "nzv"))
+
+# Summarize transform result
+print(preprocessParams)
+
+# Transform the dataset using the parameters
+nhanes_std <- predict(preprocessParams, nhanes)
+
+# Summarize the transformed dataset
+summary(nhanes_std)
+```
+
+Data is now Standardized. I tried applying PCA reduction but it impacted negatively our final Accuracy metrics and AUC, I decided not to use that method.
+
+
+## Split our dataset into Train and Test buckets
+
+In this section we will split the dataset in 2; the Train subset will contain 70% of the entire population, it will be used to train our prediction models. To assess models' performance, the Test subset will be used.
+
+This method will avoid model overfitting, providing us a Test set to assess model performance. Also, using the createDataPartition from caret will help to get the same distribution of the response variables in final Train and Test datasets (around 12% diabetes = yes).
+
+```{r}
+set.seed(1)
+set.seed(1)
+# Create the indexes for Train and Test samples, taking into account distribution of our response variable
+nhames_indexes <- createDataPartition(nhanes_std$DIQ010,
+                                   p = 0.7,
+                                   list = FALSE)
+
+# Create a train and tests from data frame 
+nhanes_train <- nhanes_std[ nhames_indexes,]
+nhanes_test  <- nhanes_std[-nhames_indexes,]
+
+```
+
+* nhanes_train - it will be used to train our models, we used 7% of entire population to do that
+* nhanes_test - will be used to test our model, check how well it generalizes
+
+
+## Fit classification models
+
+Let's create our train control with cross-validation of 10 (this value was changed during our tuning phase). Since we are predicting a boolean value - yes or no, we set summary function() = twoClassSummary.
+```{r}
+# Defining the train control parameters
+nhanes_control <- trainControl(
+  method = "cv",
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  verboseIter = FALSE,
+  sampling = "down"
+)
+```
+
+### Fitting a glm model
+
+```{r}
+set.seed(1)
+# Apply a Logistic Regressions model to predict DIQ010
+model_glm <- train(DIQ010 ~., 
+               data = nhanes_train,
+               trControl=nhanes_control,
+               method="glm",
+               metric="ROC"
+               )
+
+# Get our model insights
+model_glm
+
+# Understand variables more relevant
+varImp(model_glm)
+```
+
+
+### Fitting a Random Forest model 
+
+
+```{r}
+set.seed(1)
+# Apply a Random Forest model to predict DIQ010
+model_rf <- train(DIQ010 ~., 
+               data = nhanes_train,
+               trControl = nhanes_control,
+               method="ranger",
+               metric="ROC"
+               )
+
+# Get our model insights
+model_rf
+plot(model_rf)
+```
+
+From the output of the model, extratrees splitting rule performs better tha Gini splitting rule, the model automatically picked that one during auto-tune.
+
+### Fitting a gbm model 
+
+```{r}
+set.seed(1)
+# Apply a GBM model to predict DIQ010
+# Usage output too verbose to print, present in variable garbage_output instead
+garbage_output <- capture.output(
+  model_gbm <- train(DIQ010 ~., 
+                 data = nhanes_train,
+                 trControl=nhanes_control,
+                 metric="ROC",
+                 method="gbm"
+                 )
+)
+
+# Get our model insights
+model_gbm
+```
+
+### Assessing models Accuracy and AUC
+
+#### Confusion Matrix for GLM model
+
+```{r}
+set.seed(1)
+# predict the outcome on a test set
+predict_glm <- predict(model_glm, nhanes_test, type = 'raw')
+
+# compare predicted outcome and true outcome
+cm_glm <- confusionMatrix(data = predict_glm, reference = nhanes_test$DIQ010)
+cm_glm
+```
+
+#### Confusion Matrix for Random Forest model
+
+```{r}
+set.seed(1)
+# predict the outcome on a test set
+predict_rf <- predict(model_rf, nhanes_test)
+
+# compare predicted outcome and true outcome
+cm_rf <- confusionMatrix(data = predict_rf, reference = nhanes_test$DIQ010)
+cm_rf
+```
+
+#### Confusion Matrix for GBM model
+
+```{r}
+set.seed(1)
+# predict the outcome on a test set
+predict_gbm <- predict(model_gbm, nhanes_test)
+
+# compare predicted outcome and true outcome
+cm_gbm <- confusionMatrix(data = predict_gbm, reference = nhanes_test$DIQ010)
+cm_gbm
+```
+
+I also tried applying PCA reduction method, however performance decreased.
+
+## Compare performance of all models
+
+```{r}
+# Generate the test set AUCs using the two sets of predictions & compare
+actual <- as.numeric(as.factor(nhanes_test$DIQ010)) -1
+
+auc_glm <- auc(actual = actual, predicted = as.numeric(as.factor(predict_glm)) -1)
+auc_rf <- auc(actual = actual, predicted = as.numeric(as.factor(predict_rf)) -1)
+auc_gbm <- auc(actual = actual, predicted = as.numeric(as.factor(predict_gbm)) -1)
+
+```
+
+## Which model is better?
+
+In this final section we will evalutate the results of all models:
+
+```{r}
+# Create a matrix with all model performance metrics
+problem2_result <- rbind(c(auc_glm, cm_glm$overall["Accuracy"], cm_glm$byClass["Sensitivity"],  cm_glm$byClass["Specificity"]),
+                      c(auc_rf, cm_rf$overall["Accuracy"], cm_rf$byClass["Sensitivity"],  cm_rf$byClass["Specificity"]),
+                      c(auc_gbm, cm_gbm$overall["Accuracy"], cm_gbm$byClass["Sensitivity"],  cm_gbm$byClass["Specificity"]))
+
+# Give names to metrics
+colnames(problem2_result) <- c("AUC","Accuracy", "Specificy","Sensitivity")                      
+# Give names to rows
+rownames(problem2_result) <- c("Logistic Regression",
+                            "Random Forest",
+                            "GBM")
+# Print Final Result
+problem2_result
+```
+
+### Tuning the models
+
+First run of all models only with data pre-processed:
+
+```
+                          AUC  Accuracy Specificy Sensitivity
+Logistic Regression 0.7384690 0.9229888 0.9821791   0.4947589
+Random Forest       0.7713046 0.9290988 0.9797160   0.5628931
+GBM                 0.7906582 0.9321538 0.9775427   0.6037736
+```
+
+Using a train control with **cross validation(CV) of 10** and **sampling up** we had an improvement on all models, except in the Random Forest. 
+```
+                          AUC  Accuracy Specificy Sensitivity
+Logistic Regression 0.8511318 0.8701629 0.8762677   0.8259958
+Random Forest       0.7892647 0.9304990 0.9758041   0.6027254
+GBM                 0.8615465 0.8892566 0.8981455   0.8249476
+```
+
+Using a train control with **CV of 5** for all models, **sampling up**, performance execution got worse and all models' metrics went down.
+```
+                          AUC  Accuracy Specificy Sensitivity
+Logistic Regression 0.8513875 0.8721996 0.8788757   0.8238994
+Random Forest       0.7882165 0.9302444 0.9758041   0.6006289
+GBM                 0.8580907 0.8855652 0.8943784   0.8218029
+```
+
+Using a train control with **CV of 5 for RF and 10** for others, **sampling down** we had a huge improvement on Random Forest and a decrease in the other 2 models.
+```
+                          AUC  Accuracy Specificy Sensitivity
+Logistic Regression 0.8494316 0.8687627 0.8749638   0.8238994
+Random Forest       0.8604807 0.8762729 0.8813387   0.8396226
+GBM                 0.8571319 0.8846741 0.8935091   0.8207547
+```
+
+**Final model:** Using a train control with **CV of 10** for all models, **sampling down** improved our models with a slight decrease on GLM. But with good execution performance.
+```
+                              AUC  Accuracy Specificy Sensitivity
+Logistic Regression 0.8504798 0.8690173 0.8749638   0.8259958
+Random Forest       0.8567181 0.8728360 0.8780064   0.8354298
+GBM                 0.8575836 0.8846741 0.8933642   0.8218029
+```
+
+
+```{r}
+# List of predictions
+preds_list <- list(
+  as.numeric(as.factor(predict_glm)),
+  as.numeric(as.factor(predict_rf)), 
+  as.numeric(as.factor(predict_gbm)))
+
+# List of actual values (same for all)
+m <- length(preds_list)
+
+actuals_list <- rep(list(as.numeric(as.factor(nhanes_test$DIQ010)) -1), m)
+
+# Plot the ROC curves
+pred <- prediction(preds_list, actuals_list)
+rocs <- performance(pred, "tpr", "fpr")
+
+plot(rocs, col = as.list(1:m), main = "Test Set ROC Curves")
+
+legend(x = "bottomright", 
+       legend = c("Logistic Regression", "Random Forest", "GBM"),
+       fill = 1:m)
+```
+
+### Conclusion
+
+I will choose GBM model that outperforms GLM and Random Forest, it has an AUC of 86% with 87% Accuracy, 89% of Sensitivity and 82% of Specificity. It also executes very fast even with 10 CV folds.
+
+From the ROC curve above, I will select my cut-off point; In this case I would like to sinalize patients that have a higher chance of be or becoming diabetic, even if we have more False Positives. These patients can then perform other tests to assess more accurately if they suffer from diabetes or not. I will choose a cut-off point of 0.2 False Positive Rate.
+
+For a follow-up diagnosis exam, however, a different threshold might be better, since we want to minimize false negatives, we don’t want to release the patient, if we are not sure if the person has diabetes.
